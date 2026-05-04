@@ -1,0 +1,10 @@
+requests
+streamlit
+jsonschema
+numpy
+scipy
+pandas
+pyperclip
+matplotlib
+scikit-learn
+umap-learn

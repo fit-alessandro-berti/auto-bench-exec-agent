@@ -1,0 +1,30 @@
+services:
+  auto-bench-exec-agent:
+    build:
+      context: .
+      args:
+        GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+        GITHUB_PASSWORD: ${GITHUB_PASSWORD:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      GITHUB_USERNAME: ${GITHUB_USERNAME:-}
+      GITHUB_PASSWORD: ${GITHUB_PASSWORD:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GROK_API_KEY: ${GROK_API_KEY:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      DEEPINFRA_API_KEY: ${DEEPINFRA_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      NVIDIA_API_KEY: ${NVIDIA_API_KEY:-}
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - ./fullchain.pem:/certs/fullchain.pem:ro
+      - ./privkey.pem:/certs/privkey.pem:ro
+      - ./state:/app/state
+      - ./logs:/app/logs
+    restart: unless-stopped
