@@ -4,13 +4,13 @@ import os
 
 
 def _thread_cap() -> int | None:
-    raw_value = os.environ.get("AUTO_BENCH_MAX_WORKERS", "8").strip()
+    raw_value = os.environ.get("AUTO_BENCH_MAX_WORKERS", "60").strip()
     if raw_value.lower() in {"", "0", "none", "off", "false"}:
         return None
     try:
         return max(1, int(raw_value))
     except ValueError:
-        return 8
+        return 60
 
 
 def _install_threadpool_guard() -> None:

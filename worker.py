@@ -90,7 +90,7 @@ def build_child_env(config: dict[str, Any]) -> dict[str, str]:
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    env["AUTO_BENCH_MAX_WORKERS"] = str(config.get("max_worker_threads") or env.get("AUTO_BENCH_MAX_WORKERS") or "8")
+    env["AUTO_BENCH_MAX_WORKERS"] = str(config.get("max_worker_threads") or env.get("AUTO_BENCH_MAX_WORKERS") or "60")
     env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")

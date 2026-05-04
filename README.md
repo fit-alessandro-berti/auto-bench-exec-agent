@@ -24,6 +24,8 @@ The app looks for the four benchmark repositories first inside this directory an
 
 ## Docker
 
+The Docker deployment is protected by browser basic authentication through Nginx. Set `APP_USERNAME` and `APP_PASSWORD` in `.env`; the browser asks for them once per browser session for the same host.
+
 Create self-signed certificates in the current folder:
 
 ```bash
@@ -43,9 +45,15 @@ The certificate files are mounted into the container at runtime:
 
 They are excluded from the Docker build context and are not copied into the image.
 
-Create a `.env` file with the credentials and API keys you need:
+Create a `.env` file from the example and fill in the credentials and API keys you need:
 
 ```bash
+cp .env.example .env
+```
+
+```bash
+APP_USERNAME=admin
+APP_PASSWORD=change-this-password
 GITHUB_USERNAME=your-github-username
 GITHUB_PASSWORD=your-github-token-or-password
 OPENROUTER_API_KEY=...
@@ -59,10 +67,15 @@ QWEN_API_KEY=...
 NVIDIA_API_KEY=...
 PERPLEXITY_API_KEY=...
 GROQ_API_KEY=...
-AUTO_BENCH_MAX_WORKERS=8
+AUTO_BENCH_MAX_WORKERS=60
 ```
 
 `AUTO_BENCH_MAX_WORKERS` controls the default active Python thread cap used by the worker. It can also be changed per run from the advanced configuration panel.
+
+Docker receives API keys in two ways:
+
+- All variables in `.env` are passed into the container through `env_file`.
+- At container startup, known API key variables are also written to `/app/api_*.txt` files, for benchmarks that expect file-based keys such as `/app/api_openrouter.txt`.
 
 Build and start:
 

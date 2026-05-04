@@ -146,7 +146,7 @@ def build_worker_env() -> dict[str, str]:
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    env.setdefault("AUTO_BENCH_MAX_WORKERS", "8")
+    env.setdefault("AUTO_BENCH_MAX_WORKERS", "60")
     env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -215,9 +215,9 @@ def provider_index(provider: str | None) -> int:
 
 def default_max_worker_threads() -> int:
     try:
-        return max(1, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "8")))
+        return max(1, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "60")))
     except ValueError:
-        return 8
+        return 60
 
 
 def render_styles() -> None:

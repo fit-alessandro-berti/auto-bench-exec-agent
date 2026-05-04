@@ -1,4 +1,6 @@
 .git
+.env
+.envrc
 __pycache__
 *.pyc
 state
