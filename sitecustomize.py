@@ -8,9 +8,14 @@ def _thread_cap() -> int | None:
     if raw_value.lower() in {"", "0", "none", "off", "false"}:
         return None
     try:
-        return max(1, int(raw_value))
+        return max(60, int(raw_value))
     except ValueError:
         return 60
+
+
+def _force_configured_workers() -> bool:
+    raw_value = os.environ.get("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1").strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
 
 
 def _install_threadpool_guard() -> None:
@@ -29,8 +34,15 @@ def _install_threadpool_guard() -> None:
     original_init = thread_module.ThreadPoolExecutor.__init__
 
     def guarded_init(self, max_workers=None, *args, **kwargs):
-        bounded_workers = cap if max_workers is None else min(max_workers, cap)
-        return original_init(self, bounded_workers, *args, **kwargs)
+        if max_workers is None:
+            configured_workers = cap
+        elif max_workers <= 1:
+            configured_workers = max_workers
+        elif _force_configured_workers():
+            configured_workers = cap
+        else:
+            configured_workers = min(max_workers, cap)
+        return original_init(self, configured_workers, *args, **kwargs)
 
     thread_module.ThreadPoolExecutor.__init__ = guarded_init
     thread_module.ThreadPoolExecutor._auto_bench_guarded = True

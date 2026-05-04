@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,28 @@ def run_app_git_preflight(dry_run: bool) -> None:
             subprocess.run(command, cwd=str(REPO_ROOT), check=True)
 
 
+def build_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    python_path_entries = [str(REPO_ROOT)]
+    if env.get("PYTHONPATH"):
+        python_path_entries.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
+    env["AUTO_BENCH_THREAD_GUARD"] = "1"
+    try:
+        env["AUTO_BENCH_MAX_WORKERS"] = str(max(int(env.get("AUTO_BENCH_MAX_WORKERS", "60")), 60))
+    except ValueError:
+        env["AUTO_BENCH_MAX_WORKERS"] = "60"
+    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
+    env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("NUMEXPR_NUM_THREADS", "1")
+    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    return env
+
+
 def main() -> None:
     parser = build_parser()
     args, unknown = parser.parse_known_args()
@@ -66,13 +89,15 @@ def main() -> None:
 
     run_app_git_preflight(args.dry_run)
 
+    child_env = build_child_env()
+    print(f"Thread workers: {child_env['AUTO_BENCH_MAX_WORKERS']}")
     forwarded_args = sys.argv[1:]
     for benchmark in BENCHMARKS:
         script_path = resolve_benchmark_cli(benchmark)
         command = [args.python, str(script_path)] + forwarded_args
         print("+", " ".join(command))
         if not args.dry_run:
-            subprocess.run(command, cwd=str(script_path.parent), check=True)
+            subprocess.run(command, cwd=str(script_path.parent), env=child_env, check=True)
 
 
 if __name__ == "__main__":

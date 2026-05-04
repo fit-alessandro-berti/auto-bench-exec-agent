@@ -90,7 +90,10 @@ def build_child_env(config: dict[str, Any]) -> dict[str, str]:
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    env["AUTO_BENCH_MAX_WORKERS"] = str(config.get("max_worker_threads") or env.get("AUTO_BENCH_MAX_WORKERS") or "60")
+    default_workers = max(parse_worker_count(env.get("AUTO_BENCH_MAX_WORKERS") or "60", 60), 60)
+    requested_workers = parse_worker_count(config.get("max_worker_threads") or default_workers, default_workers)
+    env["AUTO_BENCH_MAX_WORKERS"] = str(max(default_workers, requested_workers))
+    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
     env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -107,13 +110,20 @@ def popen_detached_kwargs() -> dict[str, Any]:
     return {"start_new_session": True}
 
 
+def parse_worker_count(value: Any, fallback: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
 def run_benchmarks(config: dict[str, Any]) -> int:
     command = build_command(config)
     child_env = build_child_env(config)
     started_at = read_status().get("started_at") or utc_now()
     with LOG_PATH.open("a", encoding="utf-8") as log_handler:
         log_handler.write(f"[{utc_now()}] worker pid={os.getpid()}\n")
-        log_handler.write(f"[{utc_now()}] thread cap={child_env.get('AUTO_BENCH_MAX_WORKERS')}\n")
+        log_handler.write(f"[{utc_now()}] thread workers={child_env.get('AUTO_BENCH_MAX_WORKERS')}\n")
         log_handler.write(f"[{utc_now()}] $ {' '.join(command)}\n")
         process = subprocess.Popen(
             command,

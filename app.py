@@ -238,7 +238,8 @@ def build_worker_env() -> dict[str, str]:
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    env.setdefault("AUTO_BENCH_MAX_WORKERS", "60")
+    env["AUTO_BENCH_MAX_WORKERS"] = str(max(default_max_worker_threads(), 60))
+    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
     env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
     env.setdefault("OMP_NUM_THREADS", "1")
     env.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -307,9 +308,17 @@ def provider_index(provider: str | None) -> int:
 
 def default_max_worker_threads() -> int:
     try:
-        return max(1, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "60")))
+        return max(60, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "60")))
     except ValueError:
         return 60
+
+
+def normalize_worker_threads(value: Any) -> int:
+    default_workers = default_max_worker_threads()
+    try:
+        return max(default_workers, int(value))
+    except (TypeError, ValueError):
+        return default_workers
 
 
 def render_styles() -> None:
@@ -429,9 +438,9 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
                 "Max Python worker threads",
                 min_value=1,
                 step=1,
-                value=int(defaults.get("max_worker_threads") or default_max_worker_threads()),
+                value=normalize_worker_threads(defaults.get("max_worker_threads")),
                 disabled=disabled,
-                help="Caps ThreadPoolExecutor workers in benchmark subprocesses. Native library pools are limited separately.",
+                help="Sets ThreadPoolExecutor workers in benchmark subprocesses. Single-worker pools stay single-threaded; native library pools are limited separately.",
             )
 
         submitted = st.form_submit_button("Submit benchmark", disabled=disabled)

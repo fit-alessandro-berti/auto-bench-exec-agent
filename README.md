@@ -11,7 +11,7 @@ Automatic Benchmark Execution Agent for:
 
 The app accepts an LLM name and provider on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
 
-When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers a stop button for the active execution. The Streamlit process only launches a background worker process; the worker runs the benchmarks and caps Python threads/thread pools to avoid benchmark subprocesses exhausting threads in the web process.
+When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers a stop button for the active execution. The Streamlit process only launches a background worker process; the worker runs the benchmarks and sets Python thread pools to the configured worker count while limiting raw Python threads to avoid benchmark subprocesses exhausting the web process.
 
 Run locally:
 
@@ -68,9 +68,10 @@ NVIDIA_API_KEY=...
 PERPLEXITY_API_KEY=...
 GROQ_API_KEY=...
 AUTO_BENCH_MAX_WORKERS=60
+AUTO_BENCH_FORCE_CONFIGURED_WORKERS=1
 ```
 
-`AUTO_BENCH_MAX_WORKERS` controls the default active Python thread cap used by the worker. It can also be changed per run from the advanced configuration panel.
+`AUTO_BENCH_MAX_WORKERS` controls the Python worker count used by benchmark subprocesses. Values lower than 60 are clamped to 60; higher values are allowed. It can also be changed per run from the advanced configuration panel. Explicit single-worker pools remain single-threaded; other `ThreadPoolExecutor` pools are normalized to this value by default. Set `AUTO_BENCH_FORCE_CONFIGURED_WORKERS=0` to use the value only as an upper cap.
 
 Docker receives API keys in two ways:
 
