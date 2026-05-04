@@ -11,7 +11,7 @@ Automatic Benchmark Execution Agent for:
 
 The app accepts an LLM name and provider on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
 
-When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, and displays the current log tail. The Streamlit process only launches a background worker process; the worker runs the benchmarks and caps Python threads/thread pools to avoid benchmark subprocesses exhausting threads in the web process.
+When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers a stop button for the active execution. The Streamlit process only launches a background worker process; the worker runs the benchmarks and caps Python threads/thread pools to avoid benchmark subprocesses exhausting threads in the web process.
 
 Run locally:
 

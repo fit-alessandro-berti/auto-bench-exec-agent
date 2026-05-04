@@ -136,20 +136,25 @@ def run_benchmarks(config: dict[str, Any]) -> int:
             }
         )
         returncode = process.wait()
+        latest_status = read_status()
+        was_stopped = latest_status.get("state") in {"stopping", "stopped"}
         write_status(
             {
-                "state": "completed" if returncode == 0 else "failed",
+                "state": "stopped" if was_stopped else "completed" if returncode == 0 else "failed",
                 "worker_pid": os.getpid(),
                 "pid": process.pid,
                 "command": command,
                 "config": config,
                 "started_at": started_at,
                 "finished_at": utc_now(),
-                "returncode": returncode,
+                "returncode": None if was_stopped else returncode,
                 "log_path": str(LOG_PATH),
             }
         )
-        log_handler.write(f"[{utc_now()}] finished with return code {returncode}\n")
+        if was_stopped:
+            log_handler.write(f"[{utc_now()}] stopped by request\n")
+        else:
+            log_handler.write(f"[{utc_now()}] finished with return code {returncode}\n")
     return returncode
 
 

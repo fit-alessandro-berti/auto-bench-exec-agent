@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ LOCK_PATH = STATE_DIR / "benchmark.lock"
 LOG_PATH = LOG_DIR / "benchmark.log"
 JOB_CONFIG_PATH = STATE_DIR / "job_config.json"
 STARTING_GRACE_SECONDS = 120
+TERMINATION_GRACE_SECONDS = 5.0
 PROVIDERS = [
     "openrouter",
     "openai",
@@ -111,7 +114,7 @@ def acquire_lock() -> bool:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         status = read_status()
-        if status.get("state") in {"starting", "running"} and (has_live_worker(status) or is_recent_starting_status(status)):
+        if status.get("state") in {"starting", "running", "stopping"} and (has_live_worker(status) or is_recent_starting_status(status)):
             return False
         LOCK_PATH.unlink(missing_ok=True)
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -126,7 +129,16 @@ def release_lock() -> None:
 
 def normalize_status() -> dict[str, Any]:
     status = read_status()
-    if status.get("state") in {"starting", "running"} and not has_live_worker(status) and not is_recent_starting_status(status):
+    if status.get("state") == "stopping" and not has_live_worker(status):
+        status = {
+            **status,
+            "state": "stopped",
+            "finished_at": status.get("finished_at") or utc_now(),
+            "returncode": None,
+        }
+        write_status(status)
+        release_lock()
+    elif status.get("state") in {"starting", "running"} and not has_live_worker(status) and not is_recent_starting_status(status):
         status = {
             **status,
             "state": "failed",
@@ -137,6 +149,86 @@ def normalize_status() -> dict[str, Any]:
         write_status(status)
         release_lock()
     return status
+
+
+def append_log(message: str) -> None:
+    ensure_dirs()
+    with LOG_PATH.open("a", encoding="utf-8") as log_handler:
+        log_handler.write(f"[{utc_now()}] {message}\n")
+
+
+def unique_pids(*values: Any) -> list[int]:
+    pids = []
+    for value in values:
+        pid = coerce_pid(value)
+        if pid and pid != os.getpid() and pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def terminate_process_tree(pid: int, force: bool) -> None:
+    if os.name == "nt":
+        command = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            command.append("/F")
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except ProcessLookupError:
+        return
+    except PermissionError as exc:
+        append_log(f"could not terminate pid={pid}: {exc}")
+    except OSError:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            return
+
+
+def wait_until_stopped(pids: list[int], timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(pid_is_running(pid) for pid in pids):
+            return True
+        time.sleep(0.2)
+    return not any(pid_is_running(pid) for pid in pids)
+
+
+def stop_current_execution(status: dict[str, Any]) -> bool:
+    if status.get("state") not in {"starting", "running", "stopping"}:
+        return False
+
+    pids = unique_pids(status.get("pid"), status.get("worker_pid"))
+    stopping_status = {
+        **status,
+        "state": "stopping",
+        "stop_requested_at": utc_now(),
+    }
+    write_status(stopping_status)
+    append_log("stop requested from Streamlit UI")
+
+    for pid in pids:
+        terminate_process_tree(pid, force=False)
+
+    if not wait_until_stopped(pids, TERMINATION_GRACE_SECONDS):
+        for pid in pids:
+            if pid_is_running(pid):
+                terminate_process_tree(pid, force=True)
+        wait_until_stopped(pids, 1.0)
+
+    stopped_status = {
+        **stopping_status,
+        "state": "stopped",
+        "finished_at": utc_now(),
+        "returncode": None,
+    }
+    write_status(stopped_status)
+    append_log("benchmark execution stopped")
+    release_lock()
+    return True
 
 
 def build_worker_env() -> dict[str, str]:
@@ -389,13 +481,17 @@ def main() -> None:
     st.title("Benchmark Executor")
 
     status = normalize_status()
-    busy = status.get("state") in {"starting", "running"}
+    busy = status.get("state") in {"starting", "running", "stopping"}
     defaults = status.get("config") if isinstance(status.get("config"), dict) else {}
 
     if busy:
         st.markdown("<meta http-equiv='refresh' content='10'>", unsafe_allow_html=True)
         render_styles()
         render_busy_spinner()
+        if st.button("Stop benchmark", type="primary", disabled=status.get("state") == "stopping"):
+            if stop_current_execution(status):
+                st.rerun()
+            st.error("No active benchmark execution could be stopped.")
         render_form(disabled=True, defaults=defaults)
         st.caption(f"Started: {status.get('started_at', '')}")
         log_tail = read_log_tail()
@@ -403,7 +499,7 @@ def main() -> None:
             st.code(log_tail, language="text")
         return
 
-    if status.get("state") in {"completed", "failed"}:
+    if status.get("state") in {"completed", "failed", "stopped"}:
         message = f"Last run: {status.get('state')} at {status.get('finished_at', '')}"
         if status.get("returncode") is not None:
             message += f" (return code {status.get('returncode')})"
