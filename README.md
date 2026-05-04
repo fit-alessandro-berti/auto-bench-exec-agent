@@ -11,7 +11,7 @@ Automatic Benchmark Execution Agent for:
 
 The app accepts an LLM name and provider on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
 
-When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, and displays the current log tail.
+When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, and displays the current log tail. The Streamlit process only launches a background worker process; the worker runs the benchmarks and caps Python threads/thread pools to avoid benchmark subprocesses exhausting threads in the web process.
 
 Run locally:
 
@@ -59,7 +59,10 @@ QWEN_API_KEY=...
 NVIDIA_API_KEY=...
 PERPLEXITY_API_KEY=...
 GROQ_API_KEY=...
+AUTO_BENCH_MAX_WORKERS=8
 ```
+
+`AUTO_BENCH_MAX_WORKERS` controls the default active Python thread cap used by the worker. It can also be changed per run from the advanced configuration panel.
 
 Build and start:
 

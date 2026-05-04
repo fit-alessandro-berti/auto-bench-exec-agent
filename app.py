@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +17,8 @@ LOG_DIR = APP_ROOT / "logs"
 STATUS_PATH = STATE_DIR / "status.json"
 LOCK_PATH = STATE_DIR / "benchmark.lock"
 LOG_PATH = LOG_DIR / "benchmark.log"
+JOB_CONFIG_PATH = STATE_DIR / "job_config.json"
+STARTING_GRACE_SECONDS = 120
 PROVIDERS = [
     "openrouter",
     "openai",
@@ -62,7 +63,15 @@ def write_status(status: dict[str, Any]) -> None:
     tmp_path.replace(STATUS_PATH)
 
 
-def pid_is_running(pid: int | None) -> bool:
+def coerce_pid(pid: Any) -> int | None:
+    try:
+        return int(pid)
+    except (TypeError, ValueError):
+        return None
+
+
+def pid_is_running(pid: Any) -> bool:
+    pid = coerce_pid(pid)
     if not pid:
         return False
     try:
@@ -72,13 +81,37 @@ def pid_is_running(pid: int | None) -> bool:
     return True
 
 
+def seconds_since(timestamp: Any) -> float | None:
+    if not isinstance(timestamp, str):
+        return None
+    try:
+        normalized = timestamp.replace("Z", "+00:00")
+        started = datetime.fromisoformat(normalized)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - started).total_seconds()
+    except ValueError:
+        return None
+
+
+def has_live_worker(status: dict[str, Any]) -> bool:
+    return pid_is_running(status.get("worker_pid")) or pid_is_running(status.get("pid"))
+
+
+def is_recent_starting_status(status: dict[str, Any]) -> bool:
+    if status.get("state") != "starting":
+        return False
+    age = seconds_since(status.get("started_at"))
+    return age is not None and age < STARTING_GRACE_SECONDS
+
+
 def acquire_lock() -> bool:
     ensure_dirs()
     try:
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         status = read_status()
-        if status.get("state") == "running" and pid_is_running(status.get("pid")):
+        if status.get("state") in {"starting", "running"} and (has_live_worker(status) or is_recent_starting_status(status)):
             return False
         LOCK_PATH.unlink(missing_ok=True)
         fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -93,7 +126,7 @@ def release_lock() -> None:
 
 def normalize_status() -> dict[str, Any]:
     status = read_status()
-    if status.get("state") == "running" and not pid_is_running(status.get("pid")):
+    if status.get("state") in {"starting", "running"} and not has_live_worker(status) and not is_recent_starting_status(status):
         status = {
             **status,
             "state": "failed",
@@ -106,106 +139,85 @@ def normalize_status() -> dict[str, Any]:
     return status
 
 
-def optional_arg(command: list[str], flag: str, value: Any) -> None:
-    if value is None:
-        return
-    if isinstance(value, str) and not value.strip():
-        return
-    command.extend([flag, str(value)])
+def build_worker_env() -> dict[str, str]:
+    env = os.environ.copy()
+    python_path_entries = [str(APP_ROOT)]
+    if env.get("PYTHONPATH"):
+        python_path_entries.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
+    env["AUTO_BENCH_THREAD_GUARD"] = "1"
+    env.setdefault("AUTO_BENCH_MAX_WORKERS", "8")
+    env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("NUMEXPR_NUM_THREADS", "1")
+    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    return env
 
 
-def build_command(config: dict[str, Any]) -> list[str]:
-    command = [sys.executable, str(APP_ROOT / "cli_execute.py"), config["model_name"]]
-    optional_arg(command, "--provider", config.get("provider"))
-    optional_arg(command, "--base-model", config.get("base_model"))
-    optional_arg(command, "--alias", config.get("alias"))
-    optional_arg(command, "--api-url", config.get("api_url"))
-    optional_arg(command, "--api-key-env", config.get("api_key_env"))
-    optional_arg(command, "--api-key-file", config.get("api_key_file"))
-    optional_arg(command, "--reasoning-effort", config.get("reasoning_effort"))
-    if config.get("reasoning_enabled"):
-        command.append("--reasoning-enabled")
-    optional_arg(command, "--thinking-tokens", config.get("thinking_tokens"))
-    optional_arg(command, "--temperature", config.get("temperature"))
-    optional_arg(command, "--max-tokens", config.get("max_tokens"))
-    optional_arg(command, "--system-prompt", config.get("system_prompt"))
-    optional_arg(command, "--add-prompt", config.get("add_prompt"))
-    optional_arg(command, "--payload-json", config.get("payload_json"))
-    optional_arg(command, "--tools-json", config.get("tools_json"))
-    optional_arg(command, "--config-json", config.get("config_json"))
-    optional_arg(command, "--config-file", config.get("config_file"))
-    return command
+def popen_detached_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
 
 
-def run_benchmarks(config: dict[str, Any]) -> None:
-    command = build_command(config)
+def submit_job(config: dict[str, Any]) -> bool:
+    if not acquire_lock():
+        return False
+    ensure_dirs()
+    LOG_PATH.write_text("", encoding="utf-8")
+    with JOB_CONFIG_PATH.open("w", encoding="utf-8") as handler:
+        json.dump(config, handler, indent=2)
+        handler.write("\n")
+
+    started_at = utc_now()
+    write_status({"state": "starting", "config": config, "started_at": started_at, "log_path": str(LOG_PATH)})
+    command = [sys.executable, str(APP_ROOT / "worker.py"), "--config-file", str(JOB_CONFIG_PATH)]
     try:
         with LOG_PATH.open("a", encoding="utf-8") as log_handler:
-            log_handler.write(f"\n[{utc_now()}] $ {' '.join(command)}\n")
-            process = subprocess.Popen(
+            log_handler.write(f"[{utc_now()}] starting worker: {' '.join(command)}\n")
+            worker = subprocess.Popen(
                 command,
                 cwd=str(APP_ROOT),
                 stdout=log_handler,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env=os.environ.copy(),
+                env=build_worker_env(),
+                **popen_detached_kwargs(),
             )
-            write_status(
-                {
-                    "state": "running",
-                    "pid": process.pid,
-                    "command": command,
-                    "config": config,
-                    "started_at": utc_now(),
-                    "log_path": str(LOG_PATH),
-                }
-            )
-            returncode = process.wait()
-            write_status(
-                {
-                    "state": "completed" if returncode == 0 else "failed",
-                    "pid": process.pid,
-                    "command": command,
-                    "config": config,
-                    "started_at": read_status().get("started_at"),
-                    "finished_at": utc_now(),
-                    "returncode": returncode,
-                    "log_path": str(LOG_PATH),
-                }
-            )
-            log_handler.write(f"[{utc_now()}] finished with return code {returncode}\n")
     except Exception as exc:
         write_status(
             {
                 "state": "failed",
-                "pid": None,
-                "command": command,
+                "worker_pid": None,
                 "config": config,
-                "started_at": read_status().get("started_at"),
+                "started_at": started_at,
                 "finished_at": utc_now(),
                 "returncode": None,
                 "error": str(exc),
                 "log_path": str(LOG_PATH),
             }
         )
-        with LOG_PATH.open("a", encoding="utf-8") as log_handler:
-            log_handler.write(f"[{utc_now()}] failed to start or execute: {exc}\n")
-    finally:
         release_lock()
-
-
-def submit_job(config: dict[str, Any]) -> bool:
-    if not acquire_lock():
         return False
-    LOG_PATH.write_text("", encoding="utf-8")
-    write_status({"state": "starting", "config": config, "started_at": utc_now(), "log_path": str(LOG_PATH)})
-    thread = threading.Thread(target=run_benchmarks, args=(config,), daemon=True)
-    thread.start()
+
+    status = read_status()
+    if status.get("state") == "starting":
+        write_status({**status, "worker_pid": worker.pid})
     return True
 
 
 def provider_index(provider: str | None) -> int:
     return PROVIDERS.index(provider) if provider in PROVIDERS else 0
+
+
+def default_max_worker_threads() -> int:
+    try:
+        return max(1, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "8")))
+    except ValueError:
+        return 8
 
 
 def render_styles() -> None:
@@ -287,6 +299,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             "tools_json": "",
             "config_json": "",
             "config_file": "",
+            "max_worker_threads": default_max_worker_threads(),
         }
 
         with st.expander("Advanced configuration", expanded=False):
@@ -320,6 +333,14 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             values["tools_json"] = st.text_area("Tools JSON", value=defaults.get("tools_json", ""), disabled=disabled)
             values["config_json"] = st.text_area("Config JSON", value=defaults.get("config_json", ""), disabled=disabled)
             values["config_file"] = st.text_input("Config file", value=defaults.get("config_file", ""), disabled=disabled)
+            values["max_worker_threads"] = st.number_input(
+                "Max Python worker threads",
+                min_value=1,
+                step=1,
+                value=int(defaults.get("max_worker_threads") or default_max_worker_threads()),
+                disabled=disabled,
+                help="Caps ThreadPoolExecutor workers in benchmark subprocesses. Native library pools are limited separately.",
+            )
 
         submitted = st.form_submit_button("Submit benchmark", disabled=disabled)
         if not submitted:
@@ -344,6 +365,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             "tools_json": values["tools_json"].strip(),
             "config_json": values["config_json"].strip(),
             "config_file": values["config_file"].strip(),
+            "max_worker_threads": int(values["max_worker_threads"]),
         }
 
 
@@ -402,7 +424,11 @@ def main() -> None:
                 return
     if submit_job(submitted_config):
         st.rerun()
-    st.error("A benchmark run is already active.")
+    status = read_status()
+    if status.get("state") == "failed" and status.get("error"):
+        st.error(f"Could not start benchmark worker: {status['error']}")
+    else:
+        st.error("A benchmark run is already active.")
 
 
 if __name__ == "__main__":
