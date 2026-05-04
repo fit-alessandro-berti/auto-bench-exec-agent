@@ -24,7 +24,7 @@ The app looks for the four benchmark repositories first inside this directory an
 
 ## Docker
 
-The Docker deployment is protected by browser basic authentication through Nginx. Set `APP_USERNAME` and `APP_PASSWORD` in `.env`; the browser asks for them once per browser session for the same host.
+The Docker deployment is protected by browser basic authentication through Nginx. Set `APP_USERNAME` and `APP_PASSWORD` in `docker-compose.yml`; the browser asks for them once per browser session for the same host.
 
 Create self-signed certificates in the current folder:
 
@@ -45,37 +45,13 @@ The certificate files are mounted into the container at runtime:
 
 They are excluded from the Docker build context and are not copied into the image.
 
-Create a `.env` file from the example and fill in the credentials and API keys you need:
-
-```bash
-cp .env.example .env
-```
-
-```bash
-APP_USERNAME=admin
-APP_PASSWORD=change-this-password
-GITHUB_USERNAME=your-github-username
-GITHUB_PASSWORD=your-github-token-or-password
-OPENROUTER_API_KEY=...
-OPENAI_API_KEY=...
-ANTHROPIC_API_KEY=...
-GOOGLE_API_KEY=...
-GROK_API_KEY=...
-MISTRAL_API_KEY=...
-DEEPINFRA_API_KEY=...
-QWEN_API_KEY=...
-NVIDIA_API_KEY=...
-PERPLEXITY_API_KEY=...
-GROQ_API_KEY=...
-AUTO_BENCH_MAX_WORKERS=60
-AUTO_BENCH_FORCE_CONFIGURED_WORKERS=1
-```
+Fill in the credentials and API keys directly in `docker-compose.yml`. The same GitHub credentials are present both under `build.args` for image-build cloning and under `environment` for runtime `git pull` / `git push`.
 
 `AUTO_BENCH_MAX_WORKERS` controls the Python worker count used by benchmark subprocesses. Values lower than 60 are clamped to 60; higher values are allowed. It can also be changed per run from the advanced configuration panel. Explicit single-worker pools remain single-threaded; other `ThreadPoolExecutor` pools are normalized to this value by default. Set `AUTO_BENCH_FORCE_CONFIGURED_WORKERS=0` to use the value only as an upper cap.
 
 Docker receives API keys in two ways:
 
-- All variables in `.env` are passed into the container through `env_file`.
+- API key variables are defined in the `environment` section of `docker-compose.yml`.
 - At container startup, known API key variables are also written to `/app/api_*.txt` files, for benchmarks that expect file-based keys such as `/app/api_openrouter.txt`.
 
 Build and start:
@@ -100,4 +76,5 @@ https://github.com/fit-alessandro-berti/d-bench
 https://github.com/fit-alessandro-berti/llm-dreams-benchmark
 ```
 
-At runtime, `GITHUB_USERNAME` and `GITHUB_PASSWORD` are also passed into the container and configured for `git pull` operations.
+During image build, `GITHUB_USERNAME` and `GITHUB_PASSWORD` are used through Git's credential helper to clone the benchmark repositories without storing credentials in their remotes.
+At runtime, the container writes the same credentials to Git's credential helper store, normalizes the benchmark remotes to `https://github.com/...`, and configures `user.name` / `user.email` from `GIT_COMMIT_USER_NAME` and `GIT_COMMIT_USER_EMAIL` so `git pull`, `git commit`, and `git push` work by default.
