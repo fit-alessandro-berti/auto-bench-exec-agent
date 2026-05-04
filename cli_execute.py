@@ -10,10 +10,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 BENCHMARKS = (
+    "llm-dreams-benchmark",
     "pm-llm-benchmark",
     "hallucin-pm-bench",
     "d-bench",
-    "llm-dreams-benchmark",
 )
 
 

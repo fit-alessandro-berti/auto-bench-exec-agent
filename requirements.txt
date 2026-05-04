@@ -4,6 +4,7 @@ jsonschema
 numpy
 scipy
 pandas
+tabulate
 pyperclip
 matplotlib
 scikit-learn
