@@ -25,6 +25,7 @@ RUN set -eux; \
       git clone "https://github.com/fit-alessandro-berti/${repo_name}.git" "/app/${repo_name}"; \
     }; \
     clone_repo pm-llm-benchmark; \
+    clone_repo pmllmbench-lrms-reasoning-analysis; \
     clone_repo hallucin-pm-bench; \
     clone_repo d-bench; \
     clone_repo llm-dreams-benchmark; \

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,9 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parent
 BENCHMARKS = (
     "llm-dreams-benchmark",
     "pm-llm-benchmark",
+    "pmllmbench-lrms-reasoning-analysis",
     "hallucin-pm-bench",
     "d-bench",
 )
+NO_ARGUMENT_BENCHMARKS = {"pmllmbench-lrms-reasoning-analysis"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,6 +62,27 @@ def run_app_git_preflight(dry_run: bool) -> None:
             subprocess.run(command, cwd=str(REPO_ROOT), check=True)
 
 
+def run_subprocess(command: list[str], cwd: Path, dry_run: bool, env: dict[str, str] | None = None) -> None:
+    print("+", " ".join(command))
+    if dry_run:
+        return
+    subprocess.run(command, cwd=str(cwd), env=env, check=True)
+
+
+def prepare_lrm_reasoning_inputs(python_executable: str, dry_run: bool, child_env: dict[str, str]) -> None:
+    pm_cli_path = resolve_benchmark_cli("pm-llm-benchmark")
+    reasoning_cli_path = resolve_benchmark_cli("pmllmbench-lrms-reasoning-analysis")
+    pm_root = pm_cli_path.parent
+    reasoning_root = reasoning_cli_path.parent
+    lrm_output_path = pm_root / "utils" / "lrms_list.txt"
+    lrm_target_path = reasoning_root / "lrms_list.txt"
+
+    run_subprocess([python_executable, "utils/list_lrms.py"], cwd=pm_root, dry_run=dry_run, env=child_env)
+    print("+", "cp", str(lrm_output_path), str(lrm_target_path))
+    if not dry_run:
+        shutil.copy2(lrm_output_path, lrm_target_path)
+
+
 def build_child_env() -> dict[str, str]:
     env = os.environ.copy()
     python_path_entries = [str(REPO_ROOT)]
@@ -94,10 +118,11 @@ def main() -> None:
     forwarded_args = sys.argv[1:]
     for benchmark in BENCHMARKS:
         script_path = resolve_benchmark_cli(benchmark)
-        command = [args.python, str(script_path)] + forwarded_args
-        print("+", " ".join(command))
-        if not args.dry_run:
-            subprocess.run(command, cwd=str(script_path.parent), env=child_env, check=True)
+        child_args = [] if benchmark in NO_ARGUMENT_BENCHMARKS else forwarded_args
+        command = [args.python, str(script_path)] + child_args
+        run_subprocess(command, cwd=script_path.parent, dry_run=args.dry_run, env=child_env)
+        if benchmark == "pm-llm-benchmark":
+            prepare_lrm_reasoning_inputs(args.python, args.dry_run, child_env)
 
 
 if __name__ == "__main__":
