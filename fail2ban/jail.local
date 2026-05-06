@@ -1,0 +1,18 @@
+[DEFAULT]
+backend = polling
+banaction = iptables-multiport
+bantime = 1h
+findtime = 10m
+maxretry = 5
+usedns = no
+
+# Repeat offenders are banned for longer, capped at 24 hours.
+bantime.increment = true
+bantime.factor = 2
+bantime.maxtime = 24h
+
+[nginx-http-auth]
+enabled = true
+filter = nginx-http-auth
+logpath = /var/log/nginx/error.log
+port = http,https

@@ -25,6 +25,7 @@ The app looks for the four benchmark repositories first inside this directory an
 ## Docker
 
 The Docker deployment is protected by browser basic authentication through Nginx. Set `APP_USERNAME` and `APP_PASSWORD` in `docker-compose.yml`; the browser asks for them once per browser session for the same host.
+The image also starts fail2ban for Nginx basic-auth failures. By default, five failed login attempts from the same IP within ten minutes are banned for one hour, with repeated bans increasing up to 24 hours. The compose file grants `NET_ADMIN` so fail2ban can install its iptables rule inside the container network namespace. Set `FAIL2BAN_ENABLED=0` to disable this layer.
 
 Create self-signed certificates in the current folder:
 

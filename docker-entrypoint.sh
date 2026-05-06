@@ -50,6 +50,21 @@ PY
 
 configure_git
 
+start_fail2ban() {
+  if [[ "${FAIL2BAN_ENABLED:-1}" == "0" ]]; then
+    echo "fail2ban disabled by FAIL2BAN_ENABLED=0" >&2
+    return
+  fi
+
+  mkdir -p /run/fail2ban /var/log/nginx
+  touch /var/log/nginx/access.log /var/log/nginx/error.log
+
+  fail2ban-client -x start
+  fail2ban-client status nginx-http-auth >/dev/null
+}
+
+start_fail2ban
+
 write_api_key_file() {
   local env_name="$1"
   local file_name="$2"

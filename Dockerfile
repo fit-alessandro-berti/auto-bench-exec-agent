@@ -9,7 +9,7 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git nginx apache2-utils ca-certificates build-essential \
+    && apt-get install -y --no-install-recommends git nginx apache2-utils fail2ban iptables ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -34,6 +34,7 @@ RUN set -eux; \
 
 COPY . /app/
 COPY nginx.conf /etc/nginx/nginx.conf
+COPY fail2ban/jail.local /etc/fail2ban/jail.local
 
 RUN chmod +x /app/docker-entrypoint.sh
 
