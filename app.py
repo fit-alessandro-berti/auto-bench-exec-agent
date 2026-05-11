@@ -12,6 +12,8 @@ from typing import Any
 
 import streamlit as st
 
+from benchmarks import BENCHMARKS, normalize_benchmark_selection
+
 
 APP_ROOT = Path(__file__).resolve().parent
 STATE_DIR = APP_ROOT / "state"
@@ -321,6 +323,13 @@ def normalize_worker_threads(value: Any) -> int:
         return default_workers
 
 
+def default_selected_benchmarks(defaults: dict[str, Any]) -> list[str]:
+    try:
+        return list(normalize_benchmark_selection(defaults.get("benchmarks"), default_to_all=True))
+    except ValueError:
+        return list(BENCHMARKS)
+
+
 def render_styles() -> None:
     st.markdown(
         """
@@ -379,6 +388,12 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
         st.markdown('<div class="primary-fields">', unsafe_allow_html=True)
         model_name = st.text_input("LLM name", value=defaults.get("model_name", ""), disabled=disabled)
         provider = st.selectbox("Provider", PROVIDERS, index=provider_index(defaults.get("provider", "openrouter")), disabled=disabled)
+        selected_benchmarks = st.multiselect(
+            "Benchmarks",
+            list(BENCHMARKS),
+            default=default_selected_benchmarks(defaults),
+            disabled=disabled,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
 
         values = {
@@ -450,6 +465,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
         return {
             "model_name": model_name.strip(),
             "provider": provider,
+            "benchmarks": list(selected_benchmarks),
             "base_model": values["base_model"].strip(),
             "alias": values["alias"].strip(),
             "api_url": values["api_url"].strip(),
@@ -519,6 +535,14 @@ def main() -> None:
         return
     if not submitted_config["model_name"]:
         st.error("LLM name is required.")
+        return
+    try:
+        submitted_config["benchmarks"] = list(normalize_benchmark_selection(submitted_config.get("benchmarks"), default_to_all=False))
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    if not submitted_config["benchmarks"]:
+        st.error("Select at least one benchmark.")
         return
     for field in ("payload_json", "tools_json", "config_json"):
         if submitted_config.get(field):

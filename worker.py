@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from benchmarks import normalize_benchmark_selection
+
 
 APP_ROOT = Path(__file__).resolve().parent
 STATE_DIR = APP_ROOT / "state"
@@ -62,6 +64,12 @@ def optional_arg(command: list[str], flag: str, value: Any) -> None:
 
 def build_command(config: dict[str, Any]) -> list[str]:
     command = [sys.executable, str(APP_ROOT / "cli_execute.py"), config["model_name"]]
+    if "benchmarks" in config:
+        selected_benchmarks = normalize_benchmark_selection(config.get("benchmarks"), default_to_all=False)
+        if not selected_benchmarks:
+            raise ValueError("At least one benchmark must be selected.")
+        for benchmark in selected_benchmarks:
+            optional_arg(command, "--benchmark", benchmark)
     optional_arg(command, "--provider", config.get("provider"))
     optional_arg(command, "--base-model", config.get("base_model"))
     optional_arg(command, "--alias", config.get("alias"))

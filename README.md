@@ -2,14 +2,15 @@
 
 Automatic Benchmark Execution Agent for:
 
+- `llm-dreams-benchmark`
 - `pm-llm-benchmark`
+- `pmllmbench-lrms-reasoning-analysis`
 - `hallucin-pm-bench`
 - `d-bench`
-- `llm-dreams-benchmark`
 
 ## Streamlit Application
 
-The app accepts an LLM name and provider on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
+The app accepts an LLM name, provider, and benchmark selection on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
 
 When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers a stop button for the active execution. The Streamlit process only launches a background worker process; the worker runs the benchmarks and sets Python thread pools to the configured worker count while limiting raw Python threads to avoid benchmark subprocesses exhausting the web process.
 
@@ -20,7 +21,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-The app looks for the four benchmark repositories first inside this directory and then in the parent directory. The Docker image clones them into `/app` during build.
+The app looks for the benchmark repositories first inside this directory and then in the parent directory. The Docker image clones them into `/app` during build.
+
+The CLI runs all benchmarks by default. Use `--benchmark` repeatedly or `--benchmarks` with a comma-separated list to select a subset:
+
+```bash
+python cli_execute.py my-model --benchmark d-bench --benchmark hallucin-pm-bench
+python cli_execute.py my-model --benchmarks d-bench,hallucin-pm-bench
+```
 
 ## Docker
 
@@ -72,6 +80,7 @@ During image build, Docker clones these repositories into `/app`:
 
 ```text
 https://github.com/fit-alessandro-berti/pm-llm-benchmark
+https://github.com/fit-alessandro-berti/pmllmbench-lrms-reasoning-analysis
 https://github.com/fit-alessandro-berti/hallucin-pm-bench
 https://github.com/fit-alessandro-berti/d-bench
 https://github.com/fit-alessandro-berti/llm-dreams-benchmark

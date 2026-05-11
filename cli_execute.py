@@ -8,21 +8,44 @@ import subprocess
 import sys
 from pathlib import Path
 
+from benchmarks import NO_ARGUMENT_BENCHMARKS, benchmark_choices_text, normalize_benchmark_selection
 
 REPO_ROOT = Path(__file__).resolve().parent
-BENCHMARKS = (
-    "llm-dreams-benchmark",
-    "pm-llm-benchmark",
-    "pmllmbench-lrms-reasoning-analysis",
-    "hallucin-pm-bench",
-    "d-bench",
-)
-NO_ARGUMENT_BENCHMARKS = {"pmllmbench-lrms-reasoning-analysis"}
+FORWARDED_VALUE_FLAGS = {
+    "--provider",
+    "--base-model",
+    "--alias",
+    "--api-url",
+    "--api-key-env",
+    "--api-key-file",
+    "--reasoning-effort",
+    "--thinking-tokens",
+    "--temperature",
+    "--max-tokens",
+    "--system-prompt",
+    "--add-prompt",
+    "--payload-json",
+    "--tools-json",
+    "--config-json",
+    "--config-file",
+    "--python",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Execute all benchmark CLIs for a target model.")
+    parser = argparse.ArgumentParser(description="Execute selected benchmark CLIs for a target model.")
     parser.add_argument("model_name", help="Model alias to benchmark.")
+    parser.add_argument(
+        "--benchmark",
+        action="append",
+        metavar="NAME",
+        help=f"Benchmark to execute. Repeat to select multiple. Valid values: {benchmark_choices_text()}. Defaults to all.",
+    )
+    parser.add_argument(
+        "--benchmarks",
+        metavar="NAMES",
+        help=f"Comma-separated benchmarks to execute. Valid values: {benchmark_choices_text()}. Defaults to all.",
+    )
     parser.add_argument("--provider", default="openrouter", help="Model provider. Defaults to openrouter.")
     parser.add_argument("--base-model", help="Underlying API model. Defaults to model_name.")
     parser.add_argument("--alias", help="Alias used inside benchmarks. Defaults to model_name.")
@@ -43,6 +66,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--python", default=sys.executable, help="Python executable used to invoke child CLIs.")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing them.")
     return parser
+
+
+def resolve_selected_benchmarks(args: argparse.Namespace) -> tuple[str, ...]:
+    values: list[str] = []
+    if args.benchmarks:
+        values.append(args.benchmarks)
+    if args.benchmark:
+        values.extend(args.benchmark)
+    return normalize_benchmark_selection(values or None)
+
+
+def build_forwarded_args(raw_args: list[str]) -> list[str]:
+    forwarded_args: list[str] = []
+    index = 0
+    while index < len(raw_args):
+        arg = raw_args[index]
+        if arg in {"--benchmark", "--benchmarks"}:
+            index += 2
+            continue
+        if arg.startswith("--benchmark=") or arg.startswith("--benchmarks="):
+            index += 1
+            continue
+        forwarded_args.append(arg)
+        if arg in FORWARDED_VALUE_FLAGS and index + 1 < len(raw_args):
+            index += 1
+            forwarded_args.append(raw_args[index])
+        index += 1
+    return forwarded_args
 
 
 def resolve_benchmark_cli(benchmark_name: str) -> Path:
@@ -110,18 +161,24 @@ def main() -> None:
     args, unknown = parser.parse_known_args()
     if unknown:
         parser.error(f"Unknown arguments: {' '.join(unknown)}")
+    try:
+        selected_benchmarks = resolve_selected_benchmarks(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     run_app_git_preflight(args.dry_run)
 
     child_env = build_child_env()
     print(f"Thread workers: {child_env['AUTO_BENCH_MAX_WORKERS']}")
-    forwarded_args = sys.argv[1:]
-    for benchmark in BENCHMARKS:
+    print(f"Benchmarks: {', '.join(selected_benchmarks)}")
+    forwarded_args = build_forwarded_args(sys.argv[1:])
+    prepare_reasoning_inputs = "pmllmbench-lrms-reasoning-analysis" in selected_benchmarks
+    for benchmark in selected_benchmarks:
         script_path = resolve_benchmark_cli(benchmark)
         child_args = [] if benchmark in NO_ARGUMENT_BENCHMARKS else forwarded_args
         command = [args.python, str(script_path)] + child_args
         run_subprocess(command, cwd=script_path.parent, dry_run=args.dry_run, env=child_env)
-        if benchmark == "pm-llm-benchmark":
+        if benchmark == "pm-llm-benchmark" and prepare_reasoning_inputs:
             prepare_lrm_reasoning_inputs(args.python, args.dry_run, child_env)
 
 
