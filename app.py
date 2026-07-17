@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
-import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +12,7 @@ from typing import Any
 import streamlit as st
 
 from benchmarks import BENCHMARKS, normalize_benchmark_selection
+from process_cleanup import JOB_ID_ENV, cleanup_spawned_processes, pid_is_running
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -23,7 +23,6 @@ LOCK_PATH = STATE_DIR / "benchmark.lock"
 LOG_PATH = LOG_DIR / "benchmark.log"
 JOB_CONFIG_PATH = STATE_DIR / "job_config.json"
 STARTING_GRACE_SECONDS = 120
-TERMINATION_GRACE_SECONDS = 5.0
 PROVIDERS = [
     "openrouter",
     "openai",
@@ -61,29 +60,11 @@ def read_status() -> dict[str, Any]:
 
 def write_status(status: dict[str, Any]) -> None:
     ensure_dirs()
-    tmp_path = STATUS_PATH.with_suffix(".json.tmp")
+    tmp_path = STATUS_PATH.with_name(f"{STATUS_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with tmp_path.open("w", encoding="utf-8") as handler:
         json.dump(status, handler, indent=2)
         handler.write("\n")
     tmp_path.replace(STATUS_PATH)
-
-
-def coerce_pid(pid: Any) -> int | None:
-    try:
-        return int(pid)
-    except (TypeError, ValueError):
-        return None
-
-
-def pid_is_running(pid: Any) -> bool:
-    pid = coerce_pid(pid)
-    if not pid:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def seconds_since(timestamp: Any) -> float | None:
@@ -131,22 +112,33 @@ def release_lock() -> None:
 
 def normalize_status() -> dict[str, Any]:
     status = read_status()
-    if status.get("state") == "stopping" and not has_live_worker(status):
+    if status.get("state") == "stopping":
+        cleanup = cleanup_spawned_processes(status)
         status = {
             **status,
             "state": "stopped",
             "finished_at": status.get("finished_at") or utc_now(),
             "returncode": None,
+            "cleanup_at": utc_now(),
+            **cleanup,
         }
         write_status(status)
         release_lock()
-    elif status.get("state") in {"starting", "running"} and not has_live_worker(status) and not is_recent_starting_status(status):
+    elif status.get("state") in {"starting", "running"}:
+        worker_pid = status.get("worker_pid")
+        worker_missing = worker_pid is not None and not pid_is_running(worker_pid)
+        execution_missing = not has_live_worker(status)
+        if not (worker_missing or (execution_missing and not is_recent_starting_status(status))):
+            return status
+        cleanup = cleanup_spawned_processes(status)
         status = {
             **status,
             "state": "failed",
             "finished_at": utc_now(),
             "returncode": None,
             "error": "The benchmark process is no longer running.",
+            "cleanup_at": utc_now(),
+            **cleanup,
         }
         write_status(status)
         release_lock()
@@ -159,51 +151,10 @@ def append_log(message: str) -> None:
         log_handler.write(f"[{utc_now()}] {message}\n")
 
 
-def unique_pids(*values: Any) -> list[int]:
-    pids = []
-    for value in values:
-        pid = coerce_pid(value)
-        if pid and pid != os.getpid() and pid not in pids:
-            pids.append(pid)
-    return pids
-
-
-def terminate_process_tree(pid: int, force: bool) -> None:
-    if os.name == "nt":
-        command = ["taskkill", "/PID", str(pid), "/T"]
-        if force:
-            command.append("/F")
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        return
-
-    sig = signal.SIGKILL if force else signal.SIGTERM
-    try:
-        os.killpg(os.getpgid(pid), sig)
-    except ProcessLookupError:
-        return
-    except PermissionError as exc:
-        append_log(f"could not terminate pid={pid}: {exc}")
-    except OSError:
-        try:
-            os.kill(pid, sig)
-        except OSError:
-            return
-
-
-def wait_until_stopped(pids: list[int], timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if not any(pid_is_running(pid) for pid in pids):
-            return True
-        time.sleep(0.2)
-    return not any(pid_is_running(pid) for pid in pids)
-
-
 def stop_current_execution(status: dict[str, Any]) -> bool:
     if status.get("state") not in {"starting", "running", "stopping"}:
         return False
 
-    pids = unique_pids(status.get("pid"), status.get("worker_pid"))
     stopping_status = {
         **status,
         "state": "stopping",
@@ -211,21 +162,19 @@ def stop_current_execution(status: dict[str, Any]) -> bool:
     }
     write_status(stopping_status)
     append_log("stop requested from Streamlit UI")
-
-    for pid in pids:
-        terminate_process_tree(pid, force=False)
-
-    if not wait_until_stopped(pids, TERMINATION_GRACE_SECONDS):
-        for pid in pids:
-            if pid_is_running(pid):
-                terminate_process_tree(pid, force=True)
-        wait_until_stopped(pids, 1.0)
+    cleanup = cleanup_spawned_processes(
+        stopping_status,
+        exclude_pids={os.getpid()},
+        trust_recorded_pids=True,
+    )
 
     stopped_status = {
         **stopping_status,
         "state": "stopped",
         "finished_at": utc_now(),
         "returncode": None,
+        "cleanup_at": utc_now(),
+        **cleanup,
     }
     write_status(stopped_status)
     append_log("benchmark execution stopped")
@@ -233,22 +182,55 @@ def stop_current_execution(status: dict[str, Any]) -> bool:
     return True
 
 
-def build_worker_env() -> dict[str, str]:
+def cleanup_current_execution(status: dict[str, Any]) -> dict[str, Any]:
+    was_busy = status.get("state") in {"starting", "running", "stopping"}
+    cleanup_status = {
+        **status,
+        "state": "stopping" if was_busy else status.get("state", "idle"),
+        "stop_requested_at": status.get("stop_requested_at") or (utc_now() if was_busy else None),
+    }
+    if was_busy:
+        write_status(cleanup_status)
+    append_log("spawned-thread cleanup requested from Streamlit UI")
+    cleanup = cleanup_spawned_processes(
+        cleanup_status,
+        exclude_pids={os.getpid()},
+        trust_recorded_pids=was_busy,
+    )
+    final_status = {
+        **cleanup_status,
+        "state": "stopped" if was_busy else cleanup_status.get("state", "idle"),
+        "finished_at": utc_now() if was_busy else cleanup_status.get("finished_at"),
+        "returncode": None if was_busy else cleanup_status.get("returncode"),
+        "cleanup_at": utc_now(),
+        **cleanup,
+    }
+    write_status(final_status)
+    if was_busy:
+        release_lock()
+    append_log(
+        "spawned-thread cleanup finished "
+        f"(terminated={len(cleanup['terminated_pids'])}, remaining={len(cleanup['remaining_pids'])})"
+    )
+    return final_status
+
+
+def build_worker_env(config: dict[str, Any], job_id: str) -> dict[str, str]:
     env = os.environ.copy()
     python_path_entries = [str(APP_ROOT)]
     if env.get("PYTHONPATH"):
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
+    env[JOB_ID_ENV] = job_id
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    env["AUTO_BENCH_MAX_WORKERS"] = str(max(default_max_worker_threads(), 60))
-    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
-    env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
-    env.setdefault("OMP_NUM_THREADS", "1")
-    env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    env.setdefault("MKL_NUM_THREADS", "1")
-    env.setdefault("NUMEXPR_NUM_THREADS", "1")
-    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    env["AUTO_BENCH_MAX_WORKERS"] = str(normalize_worker_threads(config.get("max_worker_threads")))
+    env["EVALUATION_MAX_WORKERS"] = env["AUTO_BENCH_MAX_WORKERS"]
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMEXPR_NUM_THREADS"] = "1"
+    env["VECLIB_MAXIMUM_THREADS"] = "1"
+    env["TOKENIZERS_PARALLELISM"] = "false"
     return env
 
 
@@ -268,7 +250,16 @@ def submit_job(config: dict[str, Any]) -> bool:
         handler.write("\n")
 
     started_at = utc_now()
-    write_status({"state": "starting", "config": config, "started_at": started_at, "log_path": str(LOG_PATH)})
+    job_id = uuid.uuid4().hex
+    write_status(
+        {
+            "state": "starting",
+            "job_id": job_id,
+            "config": config,
+            "started_at": started_at,
+            "log_path": str(LOG_PATH),
+        }
+    )
     command = [sys.executable, str(APP_ROOT / "worker.py"), "--config-file", str(JOB_CONFIG_PATH)]
     try:
         with LOG_PATH.open("a", encoding="utf-8") as log_handler:
@@ -279,13 +270,14 @@ def submit_job(config: dict[str, Any]) -> bool:
                 stdout=log_handler,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env=build_worker_env(),
+                env=build_worker_env(config, job_id),
                 **popen_detached_kwargs(),
             )
     except Exception as exc:
         write_status(
             {
                 "state": "failed",
+                "job_id": job_id,
                 "worker_pid": None,
                 "config": config,
                 "started_at": started_at,
@@ -310,7 +302,7 @@ def provider_index(provider: str | None) -> int:
 
 def default_max_worker_threads() -> int:
     try:
-        return max(60, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "60")))
+        return max(1, int(os.environ.get("AUTO_BENCH_MAX_WORKERS", "60")))
     except ValueError:
         return 60
 
@@ -318,7 +310,7 @@ def default_max_worker_threads() -> int:
 def normalize_worker_threads(value: Any) -> int:
     default_workers = default_max_worker_threads()
     try:
-        return max(default_workers, int(value))
+        return max(1, int(value))
     except (TypeError, ValueError):
         return default_workers
 
@@ -416,6 +408,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             "config_json": "",
             "config_file": "",
             "max_worker_threads": default_max_worker_threads(),
+            "disable_git_clean": False,
         }
 
         with st.expander("Advanced configuration", expanded=False):
@@ -449,13 +442,19 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             values["tools_json"] = st.text_area("Tools JSON", value=defaults.get("tools_json", ""), disabled=disabled)
             values["config_json"] = st.text_area("Config JSON", value=defaults.get("config_json", ""), disabled=disabled)
             values["config_file"] = st.text_input("Config file", value=defaults.get("config_file", ""), disabled=disabled)
+            values["disable_git_clean"] = st.checkbox(
+                "Disable git clean",
+                value=bool(defaults.get("disable_git_clean", False)),
+                disabled=disabled,
+                help="Skip the executor repository's git clean preflight step. Git reset and git pull still run.",
+            )
             values["max_worker_threads"] = st.number_input(
                 "Max Python worker threads",
                 min_value=1,
                 step=1,
                 value=normalize_worker_threads(defaults.get("max_worker_threads")),
                 disabled=disabled,
-                help="Sets ThreadPoolExecutor workers in benchmark subprocesses. Single-worker pools stay single-threaded; native library pools are limited separately.",
+                help="Upper-bounds Python threads and ThreadPoolExecutor workers in each active benchmark subprocess. Native library pools are limited separately.",
             )
 
         submitted = st.form_submit_button("Submit benchmark", disabled=disabled)
@@ -483,6 +482,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
             "config_json": values["config_json"].strip(),
             "config_file": values["config_file"].strip(),
             "max_worker_threads": int(values["max_worker_threads"]),
+            "disable_git_clean": bool(values["disable_git_clean"]),
         }
 
 
@@ -500,6 +500,18 @@ def render_busy_spinner() -> None:
     )
 
 
+def render_cleanup_result(status: dict[str, Any]) -> None:
+    if not status.get("cleanup_at"):
+        return
+    remaining = status.get("remaining_pids") or []
+    terminated = status.get("terminated_pids") or []
+    message = f"Last spawned-thread cleanup: {status['cleanup_at']} ({len(terminated)} processes terminated)."
+    if remaining:
+        st.warning(f"{message} Processes still running: {', '.join(map(str, remaining))}")
+    else:
+        st.caption(message)
+
+
 def main() -> None:
     ensure_dirs()
     st.set_page_config(page_title="Benchmark Executor", layout="wide")
@@ -513,10 +525,16 @@ def main() -> None:
         st.markdown("<meta http-equiv='refresh' content='10'>", unsafe_allow_html=True)
         render_styles()
         render_busy_spinner()
-        if st.button("Stop benchmark", type="primary", disabled=status.get("state") == "stopping"):
-            if stop_current_execution(status):
+        stop_column, cleanup_column = st.columns(2)
+        with stop_column:
+            if st.button("Stop benchmark", type="primary", disabled=status.get("state") == "stopping", use_container_width=True):
+                if stop_current_execution(status):
+                    st.rerun()
+                st.error("No active benchmark execution could be stopped.")
+        with cleanup_column:
+            if st.button("Clean up spawned threads", use_container_width=True):
+                cleanup_current_execution(status)
                 st.rerun()
-            st.error("No active benchmark execution could be stopped.")
         render_form(disabled=True, defaults=defaults)
         st.caption(f"Started: {status.get('started_at', '')}")
         log_tail = read_log_tail()
@@ -529,6 +547,13 @@ def main() -> None:
         if status.get("returncode") is not None:
             message += f" (return code {status.get('returncode')})"
         st.info(message)
+
+    cleanup_column, _ = st.columns(2)
+    with cleanup_column:
+        if st.button("Clean up spawned threads", use_container_width=True):
+            status = cleanup_current_execution(status)
+            st.rerun()
+    render_cleanup_result(status)
 
     submitted_config = render_form(disabled=False, defaults=defaults)
     if submitted_config is None:

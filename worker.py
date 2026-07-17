@@ -4,13 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from benchmarks import normalize_benchmark_selection
+from process_cleanup import JOB_ID_ENV, cleanup_spawned_processes
 
 
 APP_ROOT = Path(__file__).resolve().parent
@@ -43,7 +46,7 @@ def read_status() -> dict[str, Any]:
 
 def write_status(status: dict[str, Any]) -> None:
     ensure_dirs()
-    tmp_path = STATUS_PATH.with_suffix(".json.tmp")
+    tmp_path = STATUS_PATH.with_name(f"{STATUS_PATH.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     with tmp_path.open("w", encoding="utf-8") as handler:
         json.dump(status, handler, indent=2)
         handler.write("\n")
@@ -88,6 +91,9 @@ def build_command(config: dict[str, Any]) -> list[str]:
     optional_arg(command, "--tools-json", config.get("tools_json"))
     optional_arg(command, "--config-json", config.get("config_json"))
     optional_arg(command, "--config-file", config.get("config_file"))
+    optional_arg(command, "--max-worker-threads", config.get("max_worker_threads"))
+    if config.get("disable_git_clean"):
+        command.append("--disable-git-clean")
     return command
 
 
@@ -98,17 +104,16 @@ def build_child_env(config: dict[str, Any]) -> dict[str, str]:
         python_path_entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
-    default_workers = max(parse_worker_count(env.get("AUTO_BENCH_MAX_WORKERS") or "60", 60), 60)
+    default_workers = parse_worker_count(env.get("AUTO_BENCH_MAX_WORKERS") or "60", 60)
     requested_workers = parse_worker_count(config.get("max_worker_threads") or default_workers, default_workers)
-    env["AUTO_BENCH_MAX_WORKERS"] = str(max(default_workers, requested_workers))
-    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
-    env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
-    env.setdefault("OMP_NUM_THREADS", "1")
-    env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    env.setdefault("MKL_NUM_THREADS", "1")
-    env.setdefault("NUMEXPR_NUM_THREADS", "1")
-    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    env["AUTO_BENCH_MAX_WORKERS"] = str(requested_workers)
+    env["EVALUATION_MAX_WORKERS"] = env["AUTO_BENCH_MAX_WORKERS"]
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMEXPR_NUM_THREADS"] = "1"
+    env["VECLIB_MAXIMUM_THREADS"] = "1"
+    env["TOKENIZERS_PARALLELISM"] = "false"
     return env
 
 
@@ -128,7 +133,9 @@ def parse_worker_count(value: Any, fallback: int) -> int:
 def run_benchmarks(config: dict[str, Any]) -> int:
     command = build_command(config)
     child_env = build_child_env(config)
-    started_at = read_status().get("started_at") or utc_now()
+    initial_status = read_status()
+    started_at = initial_status.get("started_at") or utc_now()
+    job_id = initial_status.get("job_id") or os.environ.get(JOB_ID_ENV)
     with LOG_PATH.open("a", encoding="utf-8") as log_handler:
         log_handler.write(f"[{utc_now()}] worker pid={os.getpid()}\n")
         log_handler.write(f"[{utc_now()}] thread workers={child_env.get('AUTO_BENCH_MAX_WORKERS')}\n")
@@ -145,6 +152,7 @@ def run_benchmarks(config: dict[str, Any]) -> int:
         write_status(
             {
                 "state": "running",
+                "job_id": job_id,
                 "worker_pid": os.getpid(),
                 "pid": process.pid,
                 "command": command,
@@ -156,9 +164,15 @@ def run_benchmarks(config: dict[str, Any]) -> int:
         returncode = process.wait()
         latest_status = read_status()
         was_stopped = latest_status.get("state") in {"stopping", "stopped"}
+        cleanup = cleanup_spawned_processes(
+            {**latest_status, "job_id": job_id, "worker_pid": os.getpid(), "pid": process.pid},
+            exclude_pids={os.getpid()},
+            trust_recorded_pids=True,
+        )
         write_status(
             {
                 "state": "stopped" if was_stopped else "completed" if returncode == 0 else "failed",
+                "job_id": job_id,
                 "worker_pid": os.getpid(),
                 "pid": process.pid,
                 "command": command,
@@ -167,12 +181,18 @@ def run_benchmarks(config: dict[str, Any]) -> int:
                 "finished_at": utc_now(),
                 "returncode": None if was_stopped else returncode,
                 "log_path": str(LOG_PATH),
+                "cleanup_at": utc_now(),
+                **cleanup,
             }
         )
         if was_stopped:
             log_handler.write(f"[{utc_now()}] stopped by request\n")
         else:
             log_handler.write(f"[{utc_now()}] finished with return code {returncode}\n")
+        log_handler.write(
+            f"[{utc_now()}] spawned-thread cleanup terminated={len(cleanup['terminated_pids'])} "
+            f"remaining={len(cleanup['remaining_pids'])}\n"
+        )
     return returncode
 
 
@@ -187,6 +207,15 @@ def main() -> int:
     args = parse_args()
     command: list[str] | None = None
     config: dict[str, Any] = {}
+
+    def terminate_worker(signum: int, _frame: Any) -> None:
+        signal.signal(signum, signal.SIG_IGN)
+        raise SystemExit(128 + signum)
+
+    for signal_name in ("SIGTERM", "SIGINT"):
+        if hasattr(signal, signal_name):
+            signal.signal(getattr(signal, signal_name), terminate_worker)
+
     try:
         with open(args.config_file, "r", encoding="utf-8") as handler:
             loaded = json.load(handler)
@@ -200,6 +229,7 @@ def main() -> int:
         write_status(
             {
                 "state": "failed",
+                "job_id": status.get("job_id") or os.environ.get(JOB_ID_ENV),
                 "worker_pid": os.getpid(),
                 "pid": status.get("pid"),
                 "command": command,
@@ -215,6 +245,27 @@ def main() -> int:
             log_handler.write(f"[{utc_now()}] worker failed: {exc}\n")
         return 1
     finally:
+        status = read_status()
+        cleanup = cleanup_spawned_processes(
+            status,
+            exclude_pids={os.getpid()},
+            trust_recorded_pids=True,
+        )
+        if status.get("state") in {"starting", "running", "stopping"}:
+            was_stopping = status.get("state") == "stopping"
+            write_status(
+                {
+                    **status,
+                    "state": "stopped" if was_stopping else "failed",
+                    "finished_at": utc_now(),
+                    "returncode": None,
+                    "error": status.get("error") or (None if was_stopping else "The benchmark worker was terminated."),
+                    "cleanup_at": utc_now(),
+                    **cleanup,
+                }
+            )
+        elif not status.get("cleanup_at"):
+            write_status({**status, "cleanup_at": utc_now(), **cleanup})
         release_lock()
 
 

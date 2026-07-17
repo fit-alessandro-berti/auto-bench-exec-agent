@@ -28,8 +28,16 @@ FORWARDED_VALUE_FLAGS = {
     "--tools-json",
     "--config-json",
     "--config-file",
-    "--python",
 }
+ORCHESTRATOR_VALUE_FLAGS = {"--benchmark", "--benchmarks", "--max-worker-threads", "--python"}
+ORCHESTRATOR_BOOLEAN_FLAGS = {"--disable-git-clean", "--dry-run"}
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,6 +72,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config-json", help="Extra JSON object merged into the config.")
     parser.add_argument("--config-file", help="Path to a JSON file merged into the config.")
     parser.add_argument("--python", default=sys.executable, help="Python executable used to invoke child CLIs.")
+    parser.add_argument(
+        "--max-worker-threads",
+        type=positive_int,
+        help="Maximum Python worker threads in each benchmark subprocess. Defaults to AUTO_BENCH_MAX_WORKERS or 60.",
+    )
+    parser.add_argument(
+        "--disable-git-clean",
+        action="store_true",
+        help="Skip git clean during executor preflight. Disabled by default.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing them.")
     return parser
 
@@ -82,10 +100,13 @@ def build_forwarded_args(raw_args: list[str]) -> list[str]:
     index = 0
     while index < len(raw_args):
         arg = raw_args[index]
-        if arg in {"--benchmark", "--benchmarks"}:
+        if arg in ORCHESTRATOR_VALUE_FLAGS:
             index += 2
             continue
-        if arg.startswith("--benchmark=") or arg.startswith("--benchmarks="):
+        if any(arg.startswith(f"{flag}=") for flag in ORCHESTRATOR_VALUE_FLAGS):
+            index += 1
+            continue
+        if arg in ORCHESTRATOR_BOOLEAN_FLAGS:
             index += 1
             continue
         forwarded_args.append(arg)
@@ -104,10 +125,16 @@ def resolve_benchmark_cli(benchmark_name: str) -> Path:
     raise FileNotFoundError(f"Could not find {benchmark_name}/cli_execute.py in current or parent directory.")
 
 
-def run_app_git_preflight(dry_run: bool) -> None:
+def run_app_git_preflight(dry_run: bool, disable_git_clean: bool = False) -> None:
     if not (REPO_ROOT / ".git").exists():
         return
-    for command in (["git", "reset", "--hard", "HEAD"], ["git", "clean", "-x", "-f"], ["git", "pull"]):
+    commands = [["git", "reset", "--hard", "HEAD"]]
+    if disable_git_clean:
+        print("# git clean disabled")
+    else:
+        commands.append(["git", "clean", "-x", "-f"])
+    commands.append(["git", "pull"])
+    for command in commands:
         print("+", " ".join(command))
         if not dry_run:
             subprocess.run(command, cwd=str(REPO_ROOT), check=True)
@@ -134,7 +161,7 @@ def prepare_lrm_reasoning_inputs(python_executable: str, dry_run: bool, child_en
         shutil.copy2(lrm_output_path, lrm_target_path)
 
 
-def build_child_env() -> dict[str, str]:
+def build_child_env(max_worker_threads: int | None = None) -> dict[str, str]:
     env = os.environ.copy()
     python_path_entries = [str(REPO_ROOT)]
     if env.get("PYTHONPATH"):
@@ -142,17 +169,17 @@ def build_child_env() -> dict[str, str]:
     env["PYTHONPATH"] = os.pathsep.join(python_path_entries)
     env["AUTO_BENCH_THREAD_GUARD"] = "1"
     try:
-        env["AUTO_BENCH_MAX_WORKERS"] = str(max(int(env.get("AUTO_BENCH_MAX_WORKERS", "60")), 60))
+        default_workers = max(1, int(env.get("AUTO_BENCH_MAX_WORKERS", "60")))
     except ValueError:
-        env["AUTO_BENCH_MAX_WORKERS"] = "60"
-    env.setdefault("AUTO_BENCH_FORCE_CONFIGURED_WORKERS", "1")
-    env.setdefault("EVALUATION_MAX_WORKERS", env["AUTO_BENCH_MAX_WORKERS"])
-    env.setdefault("OMP_NUM_THREADS", "1")
-    env.setdefault("OPENBLAS_NUM_THREADS", "1")
-    env.setdefault("MKL_NUM_THREADS", "1")
-    env.setdefault("NUMEXPR_NUM_THREADS", "1")
-    env.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-    env.setdefault("TOKENIZERS_PARALLELISM", "false")
+        default_workers = 60
+    env["AUTO_BENCH_MAX_WORKERS"] = str(max_worker_threads or default_workers)
+    env["EVALUATION_MAX_WORKERS"] = env["AUTO_BENCH_MAX_WORKERS"]
+    env["OMP_NUM_THREADS"] = "1"
+    env["OPENBLAS_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    env["NUMEXPR_NUM_THREADS"] = "1"
+    env["VECLIB_MAXIMUM_THREADS"] = "1"
+    env["TOKENIZERS_PARALLELISM"] = "false"
     return env
 
 
@@ -166,9 +193,9 @@ def main() -> None:
     except ValueError as exc:
         parser.error(str(exc))
 
-    run_app_git_preflight(args.dry_run)
+    run_app_git_preflight(args.dry_run, args.disable_git_clean)
 
-    child_env = build_child_env()
+    child_env = build_child_env(args.max_worker_threads)
     print(f"Thread workers: {child_env['AUTO_BENCH_MAX_WORKERS']}")
     print(f"Benchmarks: {', '.join(selected_benchmarks)}")
     forwarded_args = build_forwarded_args(sys.argv[1:])

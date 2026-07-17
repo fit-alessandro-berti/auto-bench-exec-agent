@@ -12,7 +12,7 @@ Automatic Benchmark Execution Agent for:
 
 The app accepts an LLM name, provider, and benchmark selection on the main screen. Advanced configuration is hidden by default and remains available in the expanded settings panel.
 
-When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers a stop button for the active execution. The Streamlit process only launches a background worker process; the worker runs the benchmarks and sets Python thread pools to the configured worker count while limiting raw Python threads to avoid benchmark subprocesses exhausting the web process.
+When a benchmark run is active, the app stores its state in `state/status.json`. Reloading the page keeps the submitted configuration disabled, shows a spinner, displays the current log tail, and offers stop and spawned-thread cleanup buttons. The Streamlit process only launches a background worker process; the worker runs the benchmarks and limits Python thread pools and raw Python threads to avoid benchmark subprocesses exhausting the web process. Every run carries a unique job id inherited by its subprocesses, allowing automatic and manual cleanup to terminate orphaned descendants and their threads.
 
 Run locally:
 
@@ -28,6 +28,8 @@ The CLI runs all benchmarks by default. Use `--benchmark` repeatedly or `--bench
 ```bash
 python cli_execute.py my-model --benchmark d-bench --benchmark hallucin-pm-bench
 python cli_execute.py my-model --benchmarks d-bench,hallucin-pm-bench
+python cli_execute.py my-model --benchmark d-bench --max-worker-threads 8
+python cli_execute.py my-model --disable-git-clean
 ```
 
 ## Docker
@@ -56,7 +58,9 @@ They are excluded from the Docker build context and are not copied into the imag
 
 Fill in the credentials and API keys directly in `docker-compose.yml`. The same GitHub credentials are present both under `build.args` for image-build cloning and under `environment` for runtime `git pull` / `git push`.
 
-`AUTO_BENCH_MAX_WORKERS` controls the Python worker count used by benchmark subprocesses. Values lower than 60 are clamped to 60; higher values are allowed. It can also be changed per run from the advanced configuration panel. Explicit single-worker pools remain single-threaded; other `ThreadPoolExecutor` pools are normalized to this value by default. Set `AUTO_BENCH_FORCE_CONFIGURED_WORKERS=0` to use the value only as an upper cap.
+`AUTO_BENCH_MAX_WORKERS` is the default upper bound for Python worker threads in each benchmark subprocess. It defaults to 60, accepts any integer of at least 1, and can be overridden per run with the advanced configuration panel or `--max-worker-threads`. `ThreadPoolExecutor` pools asking for fewer workers keep their smaller value; pools asking for more are capped. Native-library thread pools are set to one thread to avoid multiplying the Python-level concurrency.
+
+The executor normally runs `git reset --hard HEAD`, `git clean -x -f`, and `git pull` before a run. Select **Disable git clean** in advanced configuration, or pass `--disable-git-clean`, to skip only the `git clean` command. The option is off by default.
 
 Docker receives API keys in two ways:
 

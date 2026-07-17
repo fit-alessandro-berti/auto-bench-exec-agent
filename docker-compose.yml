@@ -30,7 +30,6 @@ services:
       PERPLEXITY_API_KEY: ""
       GROQ_API_KEY: ""
       AUTO_BENCH_MAX_WORKERS: "60"
-      AUTO_BENCH_FORCE_CONFIGURED_WORKERS: "1"
     volumes:
       - ./fullchain.pem:/certs/fullchain.pem:ro
       - ./privkey.pem:/certs/privkey.pem:ro
