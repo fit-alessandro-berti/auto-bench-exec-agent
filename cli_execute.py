@@ -30,7 +30,7 @@ FORWARDED_VALUE_FLAGS = {
     "--config-file",
 }
 ORCHESTRATOR_VALUE_FLAGS = {"--benchmark", "--benchmarks", "--max-worker-threads", "--python"}
-ORCHESTRATOR_BOOLEAN_FLAGS = {"--disable-git-clean", "--dry-run"}
+ORCHESTRATOR_BOOLEAN_FLAGS = {"--dry-run"}
 
 
 def positive_int(value: str) -> int:
@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-git-clean",
         action="store_true",
-        help="Skip git clean during executor preflight. Disabled by default.",
+        help="Skip git clean for the executor and every selected benchmark. Disabled by default.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing them.")
     return parser
@@ -202,7 +202,10 @@ def main() -> None:
     prepare_reasoning_inputs = "pmllmbench-lrms-reasoning-analysis" in selected_benchmarks
     for benchmark in selected_benchmarks:
         script_path = resolve_benchmark_cli(benchmark)
-        child_args = [] if benchmark in NO_ARGUMENT_BENCHMARKS else forwarded_args
+        if benchmark in NO_ARGUMENT_BENCHMARKS:
+            child_args = ["--disable-git-clean"] if args.disable_git_clean else []
+        else:
+            child_args = forwarded_args
         command = [args.python, str(script_path)] + child_args
         run_subprocess(command, cwd=script_path.parent, dry_run=args.dry_run, env=child_env)
         if benchmark == "pm-llm-benchmark" and prepare_reasoning_inputs:

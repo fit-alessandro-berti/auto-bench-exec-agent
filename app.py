@@ -446,7 +446,7 @@ def render_form(disabled: bool, defaults: dict[str, Any]) -> dict[str, Any] | No
                 "Disable git clean",
                 value=bool(defaults.get("disable_git_clean", False)),
                 disabled=disabled,
-                help="Skip the executor repository's git clean preflight step. Git reset and git pull still run.",
+                help="Skip git clean for the executor and every selected benchmark. Git reset and git pull still run.",
             )
             values["max_worker_threads"] = st.number_input(
                 "Max Python worker threads",

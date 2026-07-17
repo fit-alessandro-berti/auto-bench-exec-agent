@@ -60,7 +60,7 @@ Fill in the credentials and API keys directly in `docker-compose.yml`. The same 
 
 `AUTO_BENCH_MAX_WORKERS` is the default upper bound for Python worker threads in each benchmark subprocess. It defaults to 60, accepts any integer of at least 1, and can be overridden per run with the advanced configuration panel or `--max-worker-threads`. `ThreadPoolExecutor` pools asking for fewer workers keep their smaller value; pools asking for more are capped. Native-library thread pools are set to one thread to avoid multiplying the Python-level concurrency.
 
-The executor normally runs `git reset --hard HEAD`, `git clean -x -f`, and `git pull` before a run. Select **Disable git clean** in advanced configuration, or pass `--disable-git-clean`, to skip only the `git clean` command. The option is off by default.
+The executor and every selected benchmark normally run `git reset --hard HEAD`, `git clean -x -f`, and `git pull` before a run. Select **Disable git clean** in advanced configuration, or pass `--disable-git-clean`, to forward the option to every benchmark and skip only each repository's `git clean` command. The option is off by default.
 
 Docker receives API keys in two ways:
 

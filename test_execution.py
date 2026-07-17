@@ -19,7 +19,7 @@ APP_ROOT = Path(__file__).resolve().parent
 
 
 class ExecutionConfigurationTests(unittest.TestCase):
-    def test_orchestrator_only_flags_are_not_forwarded(self) -> None:
+    def test_disable_git_clean_is_forwarded_to_benchmarks(self) -> None:
         forwarded = cli_execute.build_forwarded_args(
             [
                 "model",
@@ -33,7 +33,7 @@ class ExecutionConfigurationTests(unittest.TestCase):
                 "--dry-run",
             ]
         )
-        self.assertEqual(forwarded, ["model", "--provider", "openai"])
+        self.assertEqual(forwarded, ["model", "--provider", "openai", "--disable-git-clean"])
 
     def test_worker_command_propagates_execution_options(self) -> None:
         command = worker.build_command(
